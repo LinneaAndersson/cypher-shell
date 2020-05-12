@@ -2,6 +2,8 @@ package org.neo4j.shell.prettyprint;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -87,25 +89,37 @@ public class TablePlanFormatter {
         StringBuilder result = new StringBuilder((2 + NEWLINE.length() + headers.stream().mapToInt(h -> width(h, columns)).sum()) * (lines.size() * 2 + 3));
 
         List<Line> allLines = new ArrayList<>();
-        Map<String, Justified> headerMap = headers.stream().map(header -> Pair.of(header, new Left(header))).collect(toMap(p -> p._1, p -> p._2));
+        Map<String, List<Justified>> headerMap = headers.stream().map(header -> Pair.of(header, Collections.singletonList((Justified)new Left(header)))).collect(toMap(p -> p._1, p -> p._2));
         allLines.add(new Line(OPERATOR, headerMap, Optional.empty()));
         allLines.addAll(lines);
-        for (Line line : allLines) {
+        for (int lineIndex = 0; lineIndex < allLines.size(); lineIndex++) {
+            Line line = allLines.get(lineIndex);
             divider(headers, line, result, columns);
-            for (String header : headers) {
-                Justified detail = line.get(header);
-                result.append("| ");
-                if (detail instanceof Left) {
-                    result.append(detail.text);
-                    pad(width(header, columns) - detail.length - 2, ' ', result);
+            int lineHeight = line.details.values().stream().max(Comparator.comparingInt( v -> v.size() )).get().size();
+            for(int i = 0; i< lineHeight; i++) {
+                for (String header : headers) {
+                    List<Justified> details = line.get(header);
+                    Justified detail = new Left("");
+                    if (details.size() > i) {
+                        detail = details.get(i);
+                    } else if (OPERATOR == header && lineIndex < allLines.size() - 1) {
+                        detail = new Left(allLines.get(lineIndex + 1).connection.orElse( "" ).replace( '\\', ' ' ));
+                    }
+                    result.append( "| " );
+                    if ( detail instanceof Left )
+                    {
+                        result.append( detail.text );
+                        pad( width( header, columns ) - detail.length - 2, ' ', result );
+                    }
+                    if ( detail instanceof Right )
+                    {
+                        pad( width( header, columns ) - detail.length - 2, ' ', result );
+                        result.append( detail.text );
+                    }
+                    result.append( " " );
                 }
-                if (detail instanceof Right) {
-                    pad(width(header, columns) - detail.length - 2, ' ', result);
-                    result.append(detail.text);
-                }
-                result.append(" ");
+                result.append("|").append(NEWLINE);
             }
-            result.append("|").append(NEWLINE);
         }
         divider(headers, null, result, columns);
 
@@ -195,10 +209,10 @@ public class TablePlanFormatter {
     }
 
     @Nonnull
-    private Map<String, Justified> details(@Nonnull Plan plan, @Nonnull Map<String, Integer> columns) {
+    private Map<String, List<Justified>> details(@Nonnull Plan plan, @Nonnull Map<String, Integer> columns) {
         Map<String, Value> args = plan.arguments();
 
-        Stream<Optional<Pair<String, Justified>>> formattedPlan = args.entrySet().stream().map((e) -> {
+        Stream<Optional<Pair<String, List<Justified>>>> formattedPlan = args.entrySet().stream().map((e) -> {
             Value value = e.getValue();
             switch (e.getKey()) {
                 case "EstimatedRows":
@@ -214,26 +228,36 @@ public class TablePlanFormatter {
                 case "Order":
                     return mapping( ORDER, new Left( String.format( "%s", value.asString() ) ), columns );
                 case "Details":
-                    return mapping( DETAILS, new Left( truncate(value.asString()) ), columns );
+                    return mapping( DETAILS, multiLineDetails(value.asString()), columns );
                 case "Memory":
                     return mapping( MEMORY, new Right( String.format( "%s", value.asNumber().toString() ) ), columns );
                 default:
                     return Optional.empty();
             }
         });
+
+        List<Justified> identifiers = Collections.singletonList( new Left( identifiers( plan, columns ) ) );
+        List<Justified> others = Collections.singletonList( new Left( other( plan, columns ) ) );
         return Stream.concat(
                 formattedPlan,
                 Stream.of(
-                        Optional.of(Pair.of(IDENTIFIERS, new Left(identifiers(plan, columns)))),
-                        Optional.of(Pair.of(OTHER, new Left(other(plan, columns))))))
-                .filter(Optional::isPresent)
-                .collect(toMap(o -> o.get()._1, o -> o.get()._2));
+                        Optional.of(Pair.of( IDENTIFIERS, identifiers )),
+                        Optional.of(Pair.of( OTHER, others ))))
+                     .filter(Optional::isPresent)
+                     .collect(toMap(o -> o.get()._1, o -> o.get()._2));
     }
 
     @Nonnull
-    private Optional<Pair<String, Justified>> mapping(@Nonnull String key, @Nonnull Justified value, @Nonnull Map<String, Integer> columns) {
+    private Optional<Pair<String, List<Justified>>> mapping(@Nonnull String key, @Nonnull Justified value, @Nonnull Map<String, Integer> columns) {
         update(columns, key, value.length);
-        return Optional.of(Pair.of(key, value));
+        return Optional.of(Pair.of(key, Collections.singletonList(value)));
+    }
+
+    @Nonnull
+    private Optional<Pair<String, List<Justified>>> mapping(@Nonnull String key, @Nonnull List<Justified> values, @Nonnull Map<String, Integer> columns) {
+        Integer maxLength = values.stream().max( Comparator.comparingInt( val -> val.length ) ).map( val -> val.length).orElse( 0 );
+        update(columns, key, maxLength);
+        return Optional.of(Pair.of(key, values));
     }
 
     @Nonnull
@@ -289,20 +313,20 @@ public class TablePlanFormatter {
     static class Line {
 
         private final String tree;
-        private final Map<String, Justified> details;
+        private final Map<String, List<Justified>> details;
         private final Optional<String> connection;
 
-        Line(String tree, Map<String, Justified> details, Optional<String> connection) {
+        Line(String tree, Map<String, List<Justified>> details, Optional<String> connection) {
             this.tree = tree;
             this.details = details;
             this.connection = connection == null ? Optional.empty() : connection;
         }
 
-        Justified get(String key) {
+        List<Justified> get(String key) {
             if (key.equals(TablePlanFormatter.OPERATOR)) {
-                return new Left(tree);
+                return Collections.singletonList(new Left(tree));
             } else
-                return details.getOrDefault(key, new Left(""));
+                return details.getOrDefault(key, Collections.singletonList(new Left("")));
         }
     }
 
@@ -447,11 +471,16 @@ public class TablePlanFormatter {
         }
     }
 
-    private String truncate( String original ) {
-        if(original.length() <= MAX_DETAILS_COLUMN_WIDTH){
-            return original;
+    private List<Justified> multiLineDetails( String original ) {
+        List<Justified> detailsList = new ArrayList<Justified>();
+
+        int currentPos = 0;
+        while(currentPos < original.length()){
+            int newPos = Math.min(original.length(), currentPos + MAX_DETAILS_COLUMN_WIDTH);
+            detailsList.add(new Left(original.substring( currentPos,  newPos)));
+            currentPos = newPos;
         }
 
-        return original.substring( 0, MAX_DETAILS_COLUMN_WIDTH - 3 ) + "...";
+        return detailsList;
     }
 }
